@@ -1,0 +1,10 @@
+torch==2.4.0
+xformers==0.0.27.post2
+tensorboard
+pillow
+torchvision
+accelerate
+huggingface_hub
+transformers
+datasets
+unsloth
