@@ -12,7 +12,7 @@ I used Ubuntu 22.04 LTS.
 - To run a script in the background process : 
 
     nohup python script.py & 
-    (need to be terminate after training)
+    (need to be terminated after training)
 
 - To see the process:
 
