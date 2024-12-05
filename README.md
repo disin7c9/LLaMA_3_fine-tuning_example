@@ -20,8 +20,8 @@ I used Ubuntu 22.04 LTS.
 
 - See also: https://unsloth.ai/
 
-## Error
+## Issue
 
-- 2024-12-04
-
-    Found some errors, mainly in IFT script.
+- 2024-12-06: Fixed the errors found on 2024-12-04
+    - There were improper usages of 'from_pretrained' and 'get_peft_model' related to loading LoRA.
+- ~~2024-12-04: Found some errors, mainly in IFT script~~
