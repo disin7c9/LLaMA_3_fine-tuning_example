@@ -15,8 +15,6 @@ from datasets import load_dataset
 # Hugging Face repository settings
 HF_write_token = "your_token"
 user_name = "your_id"
-HF_write_token = "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"
-user_name = "disin7c9"
 
 seed = 42
 
