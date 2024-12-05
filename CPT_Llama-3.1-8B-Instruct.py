@@ -21,8 +21,8 @@ seed = 42
 # Important hyperparameters
 max_seq_length = 2048
 load_in_4bit = True
-BATCH_SIZE = 2
-rank = 64
+BATCH_SIZE = 8
+rank = 128
 alpha = rank*2
 
 # designate base model
@@ -42,6 +42,8 @@ others = [
     "unsloth/Meta-Llama-3.1-8B-bnb-4bit",
     "unsloth/Meta-Llama-3.1-8B-Instruct",
 ]
+
+'''Continued Pre-Training'''
 
 # Initialize model and tokenizer
 model, tokenizer = FastLanguageModel.from_pretrained(
@@ -91,31 +93,23 @@ def formatting_prompts_func(examples):
 
 # Load and prepare dataset
 dataset = load_dataset("wikimedia/wikipedia", "20231101.ko", split = "train", )
-dataset = dataset.train_test_split(test_size=0.01, shuffle=True, seed=42) # Split dataset into train/validation sets
-train_set, val_set = dataset["train"], dataset["test"]
 
 # Format dataset
-train_set = train_set.map(formatting_prompts_func, batched = True,)
+train_set = dataset.map(formatting_prompts_func, batched = True,)
 print(train_set[0:2])
-val_set = val_set.map(formatting_prompts_func, batched = True,)
-print(val_set[0:2])
 
-
-'''Continued Pre-Training'''
 
 # Define trainer
 trainer = UnslothTrainer(
     model=model,
     tokenizer=tokenizer,
     train_dataset=train_set,
-    eval_dataset=val_set,
     dataset_text_field="text",
     max_seq_length=max_seq_length,
 
     args = UnslothTrainingArguments(
         per_device_train_batch_size=BATCH_SIZE,  # training batch size
-        per_device_eval_batch_size=BATCH_SIZE,  # validation batch size
-        gradient_accumulation_steps = 16, # by using gradient accum, we updating weights every: batch_size * gradient_accum_steps
+        gradient_accumulation_steps = 4, # by using gradient accum, we updating weights every: batch_size * gradient_accum_steps
 
         # Use warmup_ratio and num_train_epochs for longer runs!
         warmup_ratio = 0.1,
@@ -127,17 +121,10 @@ trainer = UnslothTrainer(
 
         # validation and save
         logging_steps=100,
-        eval_strategy='steps',
-        eval_steps=500,
         save_strategy='steps',
-        save_steps=1000,
-        save_total_limit=10,
+        save_steps=5000,
+        save_total_limit=3,
         save_safetensors=True,
-        
-        # # callback
-        # load_best_model_at_end=True, # this option is only available when eval_strategy == save_strategy
-        # metric_for_best_model="eval_loss",
-        # greater_is_better=False,
 
         # dtype
         fp16 = not is_bfloat16_supported(),
@@ -181,30 +168,22 @@ tokenizer.push_to_hub(
 
 # Reinit
 model, tokenizer = FastLanguageModel.from_pretrained(
-    model_name=base_model_path,
+    model_name=CPT_path,
     max_seq_length=max_seq_length,
     dtype=torch.bfloat16,
     load_in_4bit=load_in_4bit,
 )
 
-# Apply CPT LoRA 
-model = FastLanguageModel.get_peft_model(
-    model,
-    r = rank,
-    target_modules = ["q_proj", "k_proj", "v_proj", "o_proj",
-                      "gate_proj", "up_proj", "down_proj",
-                      "embed_tokens", "lm_head",], 
-    lora_alpha = alpha,
-)
-model.bfloat16() # fit the loaded lora dtype
-model.load_adapter(CPT_path, adapter_name="CPT")
-model.merge_and_unload()
-
-# Unnecessary, but clearly configure the tokenizer
-cpt_tokenizer = AutoTokenizer.from_pretrained(CPT_path)
-
 FastLanguageModel.for_inference(model) # Enable native 2x faster inference
 
+# # generative strategy
+# temperature=0.7
+# top_p = 0.9
+# repetition_penalty=1.1
+# do_sample=True
+# num_beams=1
+max_new_tokens=128
+use_cache=True
 
 # Test 1
 alpaca_prompt = """Below is an instruction that describes a task, paired with an input that provides further context. Write a response that appropriately completes the request.
@@ -217,7 +196,7 @@ alpaca_prompt = """Below is an instruction that describes a task, paired with an
 
 ### Response:
 {}"""
-inputs = cpt_tokenizer(
+inputs = tokenizer(
 [
     alpaca_prompt.format(
         "What is a famous tall tower in Paris?", # instruction
@@ -226,18 +205,30 @@ inputs = cpt_tokenizer(
     )
 ], return_tensors = "pt").to("cuda")
 
-text_streamer = TextStreamer(cpt_tokenizer)
-_ = model.generate(**inputs, streamer = text_streamer, max_new_tokens = 128)
+# text_streamer = TextStreamer(tokenizer)
+# _ = model.generate(
+#     **inputs, 
+#     streamer=text_streamer, 
+#     temperature=temperature, 
+#     top_p=top_p, 
+#     do_sample=do_sample,
+#     num_beams=num_beams,
+#     repetition_penalty=repetition_penalty, 
+#     max_new_tokens=max_new_tokens,
+#     use_cache=use_cache,
+#     )
+outputs = model.generate(**inputs, max_new_tokens= max_new_tokens, use_cache=use_cache)
+print(tokenizer.batch_decode(outputs)[0])
 
 # 2
-alpaca_prompt = """다음은 작업을 설명하는 명령입니다. 요청을 완벽하게 완료하는 응답을 작성하세요.
+alpaca_prompt = """다음은 작업을 설명하는 명령입니다. 요청을 적절하게 완료하는 응답을 작성하세요.
 
     ### 지침:
     {}
 
     ### 응답:
     {}"""
-inputs = cpt_tokenizer(
+inputs = tokenizer(
 [
     alpaca_prompt.format(
         # "Continue the fibonacci sequence: 1, 1, 2, 3, 5, 8,", # instruction
@@ -246,18 +237,18 @@ inputs = cpt_tokenizer(
     )
 ], return_tensors = "pt").to("cuda")
 
-outputs = model.generate(**inputs, max_new_tokens = 64, use_cache = True)
-print(cpt_tokenizer.batch_decode(outputs)[0])
+outputs = model.generate(**inputs, max_new_tokens= max_new_tokens, use_cache=use_cache)
+print(tokenizer.batch_decode(outputs)[0])
 
 # 3
-alpaca_prompt = """다음은 작업을 설명하는 명령입니다. 요청에 적절하게 응답하세요.
+alpaca_prompt = """다음은 작업을 설명하는 명령입니다. 요청을 적절하게 완료하는 응답을 작성하세요.
 
     ### 지침:
     {}
 
     ### 응답:
     {}"""
-inputs = cpt_tokenizer(
+inputs = tokenizer(
 [
     alpaca_prompt.format(
         # "Describe the planet Earth extensively.", # instruction
@@ -266,28 +257,8 @@ inputs = cpt_tokenizer(
     ),
 ], return_tensors = "pt").to("cuda")
 
-outputs = model.generate(**inputs, max_new_tokens = 128, use_cache = True)
-print(cpt_tokenizer.batch_decode(outputs[0], skip_special_tokens=True))
-
-# 3
-alpaca_prompt = """다음은 작업을 설명하는 명령입니다. 요청에 적절하게 응답하세요.
-
-    ### 지침:
-    {}
-
-    ### 응답:
-    {}"""
-inputs = cpt_tokenizer(
-[
-    alpaca_prompt.format(
-        # "Describe the planet Earth extensively.", # instruction
-        "지구를 광범위하게 설명하세요.",
-        "", # output - leave this blank for generation!
-    ),
-], return_tensors = "pt").to("cuda")
-
-outputs = model.generate(**inputs, max_new_tokens = 128, use_cache = True)
-print(cpt_tokenizer.batch_decode(outputs)[0])
+outputs = model.generate(**inputs, max_new_tokens= max_new_tokens, use_cache=use_cache)
+print(tokenizer.batch_decode(outputs)[0])
 
 # 4
 alpaca_prompt = """다음은 작업을 설명하는 명령입니다. 요청을 적절하게 완료하는 응답을 작성하세요.
@@ -297,7 +268,7 @@ alpaca_prompt = """다음은 작업을 설명하는 명령입니다. 요청을 �
 
     ### 응답:
     {}"""
-inputs = cpt_tokenizer(
+inputs = tokenizer(
 [
     alpaca_prompt.format(
         # "What is Korean music like?"
@@ -306,5 +277,5 @@ inputs = cpt_tokenizer(
     )
 ], return_tensors = "pt").to("cuda")
 
-text_streamer = TextStreamer(cpt_tokenizer)
-_ = model.generate(**inputs, streamer = text_streamer, max_new_tokens = 128)
+outputs = model.generate(**inputs, max_new_tokens= max_new_tokens, use_cache=use_cache)
+print(tokenizer.batch_decode(outputs)[0])

@@ -21,29 +21,12 @@ seed = 42
 # Important hyperparameters
 max_seq_length = 2048
 load_in_4bit = True
-BATCH_SIZE = 2
-rank = 16
+BATCH_SIZE = 16
+rank = 128
 alpha = rank*2
 
-# designate base model
+# repo path
 base_model_path = "unsloth/Meta-Llama-3.1-8B-Instruct-bnb-4bit"
-others = [
-    "unsloth/Llama-3.2-1B",
-    "unsloth/Llama-3.2-1B-bnb-4bit",
-    "unsloth/Llama-3.2-1B-Instruct",
-    "unsloth/Llama-3.2-1B-Instruct-bnb-4bit",
-    
-    "unsloth/Llama-3.2-3B",
-    "unsloth/Llama-3.2-3B-bnb-4bit",
-    "unsloth/Llama-3.2-3B-Instruct",
-    "unsloth/Llama-3.2-3B-Instruct-bnb-4bit",
-
-    "unsloth/Meta-Llama-3.1-8B",
-    "unsloth/Meta-Llama-3.1-8B-bnb-4bit",
-    "unsloth/Meta-Llama-3.1-8B-Instruct",
-]
-
-# CPT repo
 repo_name = "CPT_LoRA_Llama-3.1-8B-Instruct-bnb-4bit_wikipedia-ko"
 CPT_path = f"{user_name}/{repo_name}"
 
@@ -52,29 +35,11 @@ CPT_path = f"{user_name}/{repo_name}"
 
 # Initialize model and tokenizer
 model, tokenizer = FastLanguageModel.from_pretrained(
-    model_name=base_model_path,
+    model_name=CPT_path,
     max_seq_length=max_seq_length,
     dtype=torch.bfloat16,
     load_in_4bit=load_in_4bit,
 )
-
-# Configure LoRA
-model = FastLanguageModel.get_peft_model(
-    model,
-    r = rank, # LoRA rank
-    target_modules = ["q_proj", "k_proj", "v_proj", "o_proj",
-                      "gate_proj", "up_proj", "down_proj",
-                      "embed_tokens", "lm_head",],
-    lora_alpha = alpha,
-    lora_dropout = 0.0, # Supports any, but = 0 is optimized
-    bias = "none",    # Supports any, but = "none" is optimized
-    use_gradient_checkpointing = "unsloth", # True or "unsloth" for very long context
-    random_state = seed,
-    use_rslora = True,   # Unsloth supports rank stabilized LoRA
-    loftq_config = None, # And LoftQ
-)
-
-model.load_adapter(CPT_path, adapter_name="CPT")
 
 model.print_trainable_parameters()
 
@@ -100,7 +65,7 @@ def formatting_prompts_func(conversations):
     return { "text" : texts, }
 
 alpaca_dataset = load_dataset("FreedomIntelligence/alpaca-gpt4-korean", split = "train")
-alpaca_dataset = alpaca_dataset.train_test_split(test_size=0.2, shuffle=True, seed=42) # Split dataset into train/validation sets
+alpaca_dataset = alpaca_dataset.train_test_split(test_size=0.1, shuffle=True, seed=seed) # Split dataset into train/validation sets
 alpaca_train_set, alpaca_val_set = alpaca_dataset["train"], alpaca_dataset["test"] 
 
 alpaca_train_set = alpaca_train_set.map(formatting_prompts_func, batched = True,)
@@ -121,22 +86,22 @@ trainer = UnslothTrainer(
     args = UnslothTrainingArguments(
         per_device_train_batch_size=BATCH_SIZE,  # training batch size
         per_device_eval_batch_size=BATCH_SIZE,  # validation batch size
-        gradient_accumulation_steps = 16, # by using gradient accum, we updating weights every: batch_size * gradient_accum_steps
+        gradient_accumulation_steps = 4, # by using gradient accum, we updating weights every: batch_size * gradient_accum_steps
 
         # Use warmup_ratio and num_train_epochs for longer runs!
         warmup_ratio = 0.1,
-        num_train_epochs = 2,
+        num_train_epochs = 3,
 
         # Select a 2 to 10x smaller learning rate for the embedding matrices!
         learning_rate = 5e-5,
-        embedding_learning_rate = 1e-5,
+        embedding_learning_rate = 1e-5, # dummy option now
 
         # validation and save
-        logging_steps=100,
+        logging_steps=10,
         eval_strategy='steps',
-        eval_steps=500,
+        eval_steps=100,
         save_strategy='steps',
-        save_steps=1000,
+        save_steps=100,
         save_total_limit=10,
         save_safetensors=True,
         
@@ -161,7 +126,7 @@ trainer = UnslothTrainer(
 trainer_stats = unsloth_train(trainer)
 
 # Save trained model locally and to Hugging Face Hub as normal and quantized form
-repo_name = "IFT_LoRA_Llama-3.1-8B-Instruct-bnb-4bit_wikipedia-ko_alpaca-gpt4-ko"
+repo_name = "llama-3.1-8B_lora-IFT_CPT_alpaca-gpt4-kor"
 IFT_path = f"{user_name}/{repo_name}"
 
 # Local
@@ -183,44 +148,35 @@ tokenizer.push_to_hub(
     )
 
 # GGUF / llama.cpp Conversion
-repo_name = "IFT_LoRA_Llama-3.1-8B-Instruct-bnb-4bit_wikipedia-ko_alpaca-gpt4-ko-GGUF"
+repo_name = "llama-3.1-8B_lora-IFT_CPT_alpaca-gpt4-kor_GGUF"
 IFT_GGUF_path = f"{user_name}/{repo_name}"
 
 quantization_method = "q8_0" # or "f16" or "q4_k_m"
 
 model.save_pretrained_gguf(repo_name, tokenizer, quantization_method=quantization_method)
-model.push_to_hub_gguf(IFT_GGUF_path, tokenizer, save_method = "lora", quantization_method=quantization_method, private=True, token=HF_write_token)
+model.push_to_hub_gguf(IFT_GGUF_path, tokenizer, quantization_method=quantization_method, private=True, token=HF_write_token)
 
 
 '''CPT+IFT Inference Test'''
 
 # Reinit
 model, tokenizer = FastLanguageModel.from_pretrained(
-    model_name=base_model_path,
+    model_name=IFT_path,
     max_seq_length=max_seq_length,
     dtype=torch.bfloat16,
     load_in_4bit=load_in_4bit,
 )
 
-# Apply IFT LoRA
-model = FastLanguageModel.get_peft_model(
-    model,
-    r = rank, 
-    target_modules = ["q_proj", "k_proj", "v_proj", "o_proj",
-                      "gate_proj", "up_proj", "down_proj",
-                      "embed_tokens", "lm_head",],
-    lora_alpha = alpha,
-)
-
-model = model.bfloat16() # fit the loaded lora dtype
-model.load_adapter(IFT_path, adapter_name="IFT")
-model.merge_and_unload()
-
-# Unnecessary, but clearly configure the tokenizer
-ift_tokenizer = AutoTokenizer.from_pretrained(IFT_path)
-
 FastLanguageModel.for_inference(model)
 
+# # generative strategy
+# temperature=0.7
+# top_p = 0.9
+# repetition_penalty=1.1
+# do_sample=True
+# num_beams=1
+max_new_tokens=128
+use_cache=True
 
 # 1
 alpaca_prompt = """Below is an instruction that describes a task, paired with an input that provides further context. Write a response that appropriately completes the request.
@@ -233,7 +189,7 @@ alpaca_prompt = """Below is an instruction that describes a task, paired with an
 
 ### Response:
 {}"""
-inputs = ift_tokenizer(
+inputs = tokenizer(
 [
     alpaca_prompt.format(
         "What is a famous tall tower in Paris?", # instruction
@@ -242,18 +198,30 @@ inputs = ift_tokenizer(
     )
 ], return_tensors = "pt").to("cuda")
 
-text_streamer = TextStreamer(ift_tokenizer)
-_ = model.generate(**inputs, streamer = text_streamer, max_new_tokens = 128)
+# text_streamer = TextStreamer(tokenizer)
+# _ = model.generate(
+#     **inputs, 
+#     streamer=text_streamer, 
+#     temperature=temperature, 
+#     top_p=top_p, 
+#     do_sample=do_sample,
+#     num_beams=num_beams,
+#     repetition_penalty=repetition_penalty, 
+#     max_new_tokens=max_new_tokens,
+#     use_cache=use_cache,
+#     )
+outputs = model.generate(**inputs, max_new_tokens= max_new_tokens, use_cache=use_cache)
+print(tokenizer.batch_decode(outputs)[0])
 
 # 2
-alpaca_prompt = """다음은 작업을 설명하는 명령입니다. 요청을 완벽하게 완료하는 응답을 작성하세요.
+alpaca_prompt = """다음은 작업을 설명하는 명령입니다. 요청을 적절하게 완료하는 응답을 작성하세요.
 
     ### 지침:
     {}
 
     ### 응답:
     {}"""
-inputs = ift_tokenizer(
+inputs = tokenizer(
 [
     alpaca_prompt.format(
         # "Continue the fibonacci sequence: 1, 1, 2, 3, 5, 8,", # instruction
@@ -262,18 +230,18 @@ inputs = ift_tokenizer(
     )
 ], return_tensors = "pt").to("cuda")
 
-outputs = model.generate(**inputs, max_new_tokens = 64, use_cache = True)
-print(ift_tokenizer.batch_decode(outputs)[0])
+outputs = model.generate(**inputs, max_new_tokens= max_new_tokens, use_cache=use_cache)
+print(tokenizer.batch_decode(outputs)[0])
 
 # 3
-alpaca_prompt = """다음은 작업을 설명하는 명령입니다. 요청에 적절하게 응답하세요.
+alpaca_prompt = """다음은 작업을 설명하는 명령입니다. 요청을 적절하게 완료하는 응답을 작성하세요.
 
     ### 지침:
     {}
 
     ### 응답:
     {}"""
-inputs = ift_tokenizer(
+inputs = tokenizer(
 [
     alpaca_prompt.format(
         # "Describe the planet Earth extensively.", # instruction
@@ -282,8 +250,8 @@ inputs = ift_tokenizer(
     ),
 ], return_tensors = "pt").to("cuda")
 
-outputs = model.generate(**inputs, max_new_tokens = 128, use_cache = True)
-print(ift_tokenizer.batch_decode(outputs)[0])
+outputs = model.generate(**inputs, max_new_tokens= max_new_tokens, use_cache=use_cache)
+print(tokenizer.batch_decode(outputs)[0])
 
 # 4
 alpaca_prompt = """다음은 작업을 설명하는 명령입니다. 요청을 적절하게 완료하는 응답을 작성하세요.
@@ -293,7 +261,7 @@ alpaca_prompt = """다음은 작업을 설명하는 명령입니다. 요청을 �
 
     ### 응답:
     {}"""
-inputs = ift_tokenizer(
+inputs = tokenizer(
 [
     alpaca_prompt.format(
         # "What is Korean music like?"
@@ -302,6 +270,6 @@ inputs = ift_tokenizer(
     )
 ], return_tensors = "pt").to("cuda")
 
-text_streamer = TextStreamer(ift_tokenizer)
-_ = model.generate(**inputs, streamer = text_streamer, max_new_tokens = 128)
+outputs = model.generate(**inputs, max_new_tokens= max_new_tokens, use_cache=use_cache)
+print(tokenizer.batch_decode(outputs)[0])
 
